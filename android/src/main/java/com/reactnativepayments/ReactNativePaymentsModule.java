@@ -1,371 +1,444 @@
 package com.reactnativepayments;
 
-import android.view.WindowManager;
-
 import android.app.Activity;
 import android.content.Intent;
-import android.os.Bundle;
-import android.support.annotation.Nullable;
-import android.support.annotation.NonNull;
-import android.app.Fragment;
-import android.app.FragmentManager;
-import android.support.annotation.RequiresPermission;
+import androidx.annotation.NonNull;
 import android.util.Log;
-
-import com.facebook.react.bridge.Callback;
-import com.facebook.react.bridge.ReactBridge;
-import com.facebook.react.bridge.ReadableArray;
-import com.facebook.react.bridge.ReadableMapKeySetIterator;
-import com.google.android.gms.common.api.GoogleApiClient;
-import com.google.android.gms.common.api.BooleanResult;
-import com.google.android.gms.common.api.ResultCallback;
-import com.google.android.gms.common.ConnectionResult;
-import com.google.android.gms.identity.intents.model.UserAddress;
-import com.google.android.gms.wallet.*;
 
 import com.facebook.react.bridge.ActivityEventListener;
 import com.facebook.react.bridge.BaseActivityEventListener;
+import com.facebook.react.bridge.Promise;
 import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.bridge.ReactContextBaseJavaModule;
 import com.facebook.react.bridge.ReactMethod;
+import com.facebook.react.bridge.ReadableArray;
 import com.facebook.react.bridge.ReadableMap;
-import com.facebook.react.bridge.WritableNativeArray;
-import com.facebook.react.bridge.WritableNativeMap;
-import com.facebook.react.modules.core.DeviceEventManagerModule;
+import com.google.android.gms.common.api.ApiException;
+import com.google.android.gms.common.api.Status;
+import com.google.android.gms.tasks.OnCompleteListener;
+import com.google.android.gms.tasks.Task;
+import com.google.android.gms.wallet.AutoResolveHelper;
+import com.google.android.gms.wallet.IsReadyToPayRequest;
+import com.google.android.gms.wallet.PaymentData;
+import com.google.android.gms.wallet.PaymentDataRequest;
+import com.google.android.gms.wallet.PaymentsClient;
+import com.google.android.gms.wallet.Wallet;
+import com.google.android.gms.wallet.WalletConstants;
+import com.reactnativenavigation.options.params.Bool;
 
-import java.util.ArrayList;
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 
-public class ReactNativePaymentsModule extends ReactContextBaseJavaModule implements GoogleApiClient.ConnectionCallbacks, GoogleApiClient.OnConnectionFailedListener {
-    private static final int LOAD_MASKED_WALLET_REQUEST_CODE = 88;
-    private static final int LOAD_FULL_WALLET_REQUEST_CODE = 89;
+public class ReactNativePaymentsModule extends ReactContextBaseJavaModule {
+    Boolean isAbleToPay = true;
+
+    private static final String EXPORT_NAME = "ReactNativePaymentsModule";
+
+    /** A constant integer you define to track a request for payment data activity */
+    private static final int LOAD_PAYMENT_DATA_REQUEST_CODE = 42;
+
+    private static final String E_NO_PAYMENT_REQUEST_JSON = "E_NO_PAYMENT_REQUEST_JSON";
+
+    private static final String E_NO_PAYMENT_REQUEST = "E_NO_PAYMENT_REQUEST";
+
+    private static final String E_NO_ACTIVITY = "E_NO_ACTIVITY";
+
+    private static final String E_PAYMENT_DATA = "E_PAYMENT_DATA";
+
+    private static final String PAYMENT_CANCELLED = "PAYMENT_CANCELLED";
+
+    private static final String E_AUTO_RESOLVE_FAILED = "E_AUTO_RESOLVE_FAILED";
+
+    private static final String NOT_READY_TO_PAY = "NOT_READY_TO_PAY";
+
+    private static final String E_FAILED_TO_DETECT_IF_READY = "E_FAILED_TO_DETECT_IF_READY";
+
+    private static final String ENVIRONMENT_PRODUCTION_KEY = "ENVIRONMENT_PRODUCTION";
+
+    private static final String ENVIRONMENT_TEST_KEY = "ENVIRONMENT_TEST";
 
 
-    // Google API Client
-    private GoogleApiClient mGoogleApiClient = null;
 
-    // Callbacks
-    private static Callback mShowSuccessCallback = null;
-    private static Callback mShowErrorCallback = null;
-    private static Callback mGetFullWalletSuccessCallback= null;
-    private static Callback mGetFullWalletErrorCallback = null;
+    /**
+     * Create a Google Pay API base request object with properties used in all requests
+     *
+     * @return Google Pay API base request object
+     * @throws JSONException
+     */
+    private static JSONObject getBaseRequest() throws JSONException {
+        return new JSONObject()
+                .put("apiVersion", 2)
+                .put("apiVersionMinor", 0);
+    }
 
-    public static final String REACT_CLASS = "ReactNativePayments";
+    /**
+     * Identify your gateway and your app's gateway merchant identifier
+     *
+     * <p>The Google Pay API response will return an encrypted payment method capable of being charged
+     * by a supported gateway after payer authorization
+     *
+     * @return payment data tokenization for the CARD payment method
+     * @throws JSONException
+     * @see <a
+     *     href="https://developers.google.com/pay/api/android/reference/object#PaymentMethodTokenizationSpecification">PaymentMethodTokenizationSpecification</a>
+     */
+    private static JSONObject getTokenizationSpecification(ReadableMap gateway) throws JSONException {
+        JSONObject tokenizationSpecification = new JSONObject();
+        tokenizationSpecification.put("type", "PAYMENT_GATEWAY");
+        tokenizationSpecification.put(
+                "parameters",
+                new JSONObject()
+                        .put("gateway", gateway.getString("name"))
+                        .put("gatewayMerchantId", gateway.getString("merchantId")));
 
-    private static ReactApplicationContext reactContext = null;
+        return tokenizationSpecification;
+    }
 
-    private final ActivityEventListener mActivityEventListener = new BaseActivityEventListener() {
+    /**
+     * Card networks supported by your app and your gateway
+     * @return allowed card networks
+     * @see <a
+     *     href="https://developers.google.com/pay/api/android/reference/object#CardParameters">CardParameters</a>
+     */
+    private static JSONArray getAllowedCardNetworks(ReadableArray cardNetworks) {
+
+        JSONArray jsonArray = new JSONArray();
+
+        for (Object value: cardNetworks.toArrayList()) {
+            jsonArray.put(value.toString());
+        };
+
+        return jsonArray;
+    }
+
+    /**
+     * Card authentication methods supported by your app and your gateway
+     *
+     * @return allowed card authentication methods
+     * @see <a
+     *     href="https://developers.google.com/pay/api/android/reference/object#CardParameters">CardParameters</a>
+     */
+    private static JSONArray getAllowedCardAuthMethods() {
+        return new JSONArray()
+                .put("PAN_ONLY")
+                .put("CRYPTOGRAM_3DS");
+    }
+
+    /**
+     * Describe your app's support for the CARD payment method
+     *
+     * <p>The provided properties are applicable to both an IsReadyToPayRequest and a
+     * PaymentDataRequest
+     *
+     * @return a CARD PaymentMethod object describing accepted cards
+     * @throws JSONException
+     * @see <a
+     *     href="https://developers.google.com/pay/api/android/reference/object#PaymentMethod">PaymentMethod</a>
+     */
+    private static JSONObject getBaseCardPaymentMethod(ReadableArray cardNetworks) throws JSONException {
+        JSONObject cardPaymentMethod = new JSONObject();
+        cardPaymentMethod.put("type", "CARD");
+        cardPaymentMethod.put(
+                "parameters",
+                new JSONObject()
+                        .put("allowedAuthMethods", ReactNativePaymentsModule.getAllowedCardAuthMethods())
+                        .put("allowedCardNetworks", ReactNativePaymentsModule.getAllowedCardNetworks(cardNetworks)));
+
+        return cardPaymentMethod;
+    }
+
+    /**
+     * Describe the expected returned payment data for the CARD payment method
+     *
+     * @return a CARD PaymentMethod describing accepted cards and optional fields
+     * @throws JSONException
+     * @see <a
+     *     href="https://developers.google.com/pay/api/android/reference/object#PaymentMethod">PaymentMethod</a>
+     */
+    private static JSONObject getCardPaymentMethod(ReadableMap cardPaymentMethodMap) throws JSONException {
+        JSONObject cardPaymentMethod = ReactNativePaymentsModule.getBaseCardPaymentMethod(cardPaymentMethodMap.getArray("cardNetworks"));
+        cardPaymentMethod.put("tokenizationSpecification", ReactNativePaymentsModule.getTokenizationSpecification(cardPaymentMethodMap.getMap("gateway")));
+
+        return cardPaymentMethod;
+    }
+
+    /**
+     * Provide Google Pay API with a payment amount, currency, and amount status
+     *
+     * @return information about the requested payment
+     * @throws JSONException
+     * @see <a
+     *     href="https://developers.google.com/pay/api/android/reference/object#TransactionInfo">TransactionInfo</a>
+     */
+    private static JSONObject getTransactionInfo(ReadableMap transaction) throws JSONException {
+        JSONObject transactionInfo = new JSONObject();
+        transactionInfo.put("totalPrice", transaction.getString("totalPrice"));
+        transactionInfo.put("totalPriceStatus", transaction.getString("totalPriceStatus"));
+        transactionInfo.put("currencyCode", transaction.getString("currencyCode"));
+
+        return transactionInfo;
+    }
+
+    /**
+     * Information about the merchant requesting payment information
+     *
+     * @return information about the merchant
+     * @throws JSONException
+     * @see <a
+     *     href="https://developers.google.com/pay/api/android/reference/object#MerchantInfo">MerchantInfo</a>
+     */
+    private static JSONObject getMerchantInfo(String merchantName) throws JSONException {
+        return new JSONObject()
+                .put("merchantName", merchantName);
+    }
+
+    /**
+     * An object describing accepted forms of payment by your app, used to determine a viewer's
+     * readiness to pay
+     *
+     * @return API version and payment methods supported by the app
+     * @see <a
+     *     href="https://developers.google.com/pay/api/android/reference/object#IsReadyToPayRequest">IsReadyToPayRequest</a>
+     */
+    private static JSONObject getIsReadyToPayRequest(ReadableArray cardNetworks, Boolean existingPaymentMethodRequired) {
+        try {
+            JSONObject isReadyToPayRequest = ReactNativePaymentsModule.getBaseRequest();
+            isReadyToPayRequest
+                    .put("allowedPaymentMethods", new JSONArray().put(getBaseCardPaymentMethod(cardNetworks)))
+                    .put("existingPaymentMethodRequired", existingPaymentMethodRequired);
+            return isReadyToPayRequest;
+        } catch (JSONException e) {
+            Log.e("getIsReadyToPayRequest", e.toString());
+            return null;
+        }
+    }
+
+    /**
+     * An object describing information requested in a Google Pay payment sheet
+     *
+     * @return payment data expected by your app
+     * @see <a
+     *     href="https://developers.google.com/pay/api/android/reference/object#PaymentDataRequest">PaymentDataRequest</a>
+     */
+    private static JSONObject getPaymentDataRequest(ReadableMap requestData) {
+        try {
+            JSONObject paymentDataRequest = ReactNativePaymentsModule.getBaseRequest();
+            paymentDataRequest.put(
+                    "allowedPaymentMethods", new JSONArray().put(ReactNativePaymentsModule.getCardPaymentMethod(requestData.getMap("cardPaymentMethodMap"))));
+            paymentDataRequest.put("transactionInfo", ReactNativePaymentsModule.getTransactionInfo(requestData.getMap("transaction")));
+            paymentDataRequest.put("merchantInfo", ReactNativePaymentsModule.getMerchantInfo(requestData.getString("merchantName")));
+            return paymentDataRequest;
+        } catch (JSONException e) {
+            Log.e("getPaymentDataRequest", e.toString());
+            return null;
+        }
+    }
+
+
+    /**
+     * A client for interacting with the Google Pay API
+     *
+     * @see <a
+     *     href="https://developers.google.com/android/reference/com/google/android/gms/wallet/PaymentsClient">PaymentsClient</a>
+     */
+    private PaymentsClient mPaymentsClient = null;
+
+    private Promise mRequestPaymentPromise = null;
+
+    private final ActivityEventListener mActivityEventListener = new BaseActivityEventListener(){
+
+
+        /**
+         * Handle a resolved activity from the Google Pay payment sheet
+         *
+         * @param requestCode the request code originally supplied to AutoResolveHelper in
+         *     requestPayment()
+         * @param resultCode the result code returned by the Google Pay API
+         * @param data an Intent from the Google Pay API containing payment or error data
+         * @see <a href="https://developer.android.com/training/basics/intents/result">Getting a result
+         *     from an Activity</a>
+         */
         @Override
         public void onActivityResult(Activity activity, int requestCode, int resultCode, Intent data) {
-            // retrieve the error code, if available
-            int errorCode = -1;
-            if (data != null) {
-                errorCode = data.getIntExtra(WalletConstants.EXTRA_ERROR_CODE, -1);
-            }
+
             switch (requestCode) {
-                case LOAD_MASKED_WALLET_REQUEST_CODE:
+                // value passed in AutoResolveHelper
+                case LOAD_PAYMENT_DATA_REQUEST_CODE:
                     switch (resultCode) {
                         case Activity.RESULT_OK:
-                            if (data != null) {
-                                MaskedWallet maskedWallet =
-                                        data.getParcelableExtra(WalletConstants.EXTRA_MASKED_WALLET);
+                            if(!isAbleToPay) {return;}
+                            PaymentData paymentData = PaymentData.getFromIntent(data);
+                            if(paymentData == null){
+                                mRequestPaymentPromise.reject(E_PAYMENT_DATA, "payment data is null");
+                            }else{
+                                String json = paymentData.toJson();
+                                if(json != null){
+                                    JSONObject paymentDataJson = null;
+                                    try {
+                                        paymentDataJson = new JSONObject(json);
+                                    } catch (JSONException e) {
+                                        mRequestPaymentPromise.reject(E_PAYMENT_DATA, e.getMessage());
+                                    }
+                                    if(paymentDataJson == null) return;
+                                    try {
+                                        JSONObject paymentMethodData =
+                                                paymentDataJson.getJSONObject("paymentMethodData");
+                                        String token = paymentMethodData
+                                                .getJSONObject("tokenizationData").getString("token");
+                                        mRequestPaymentPromise.resolve(token);
+                                    } catch (JSONException e) {
+                                        mRequestPaymentPromise.reject(E_PAYMENT_DATA, e.getMessage());
+                                    }
 
-                                Log.i(REACT_CLASS, "ANDROID PAY SUCCESS" + maskedWallet.getEmail());
-                                Log.i(REACT_CLASS, "ANDROID PAY SUCCESS" + buildAddressFromUserAddress(maskedWallet.getBuyerBillingAddress()));
-
-                                UserAddress userAddress = maskedWallet.getBuyerShippingAddress();
-                                WritableNativeMap shippingAddress = userAddress != null
-                                    ? buildAddressFromUserAddress(userAddress)
-                                    : null;
-
-
-                                // TODO: Move into function
-                                WritableNativeMap paymentDetails = new WritableNativeMap();
-                                paymentDetails.putString("paymentDescription", maskedWallet.getPaymentDescriptions()[0]);
-                                paymentDetails.putString("payerEmail", maskedWallet.getEmail());
-                                paymentDetails.putMap("shippingAddress", shippingAddress);
-                                paymentDetails.putString("googleTransactionId", maskedWallet.getGoogleTransactionId());
-
-                                sendEvent(reactContext, "NativePayments:onuseraccept", paymentDetails);
+                                }else{
+                                    mRequestPaymentPromise.reject(E_AUTO_RESOLVE_FAILED, "method is null");
+                                }
                             }
                             break;
                         case Activity.RESULT_CANCELED:
-                            sendEvent(reactContext, "NativePayments:onuserdismiss", null);
+                            mRequestPaymentPromise.reject(PAYMENT_CANCELLED, "payment has been canceled");
 
+                            break;
+                        case AutoResolveHelper.RESULT_ERROR:
+                            Status status = AutoResolveHelper.getStatusFromIntent(data);
+                            mRequestPaymentPromise.reject(E_AUTO_RESOLVE_FAILED, "auto resolve has been failed. status: " + status.getStatusMessage());
+
+                            // Log the status for debugging.
+                            // Generally, there is no need to show an error to the user.
+                            // The Google Pay payment sheet will present any account errors.
                             break;
                         default:
-                            Log.i(REACT_CLASS, "ANDROID PAY ERROR? " + errorCode);
-                            mShowErrorCallback.invoke(errorCode);
-
-                            break;
+                            // Do nothing.
                     }
                     break;
-                case LOAD_FULL_WALLET_REQUEST_CODE:
-                    if (resultCode == Activity.RESULT_OK && data != null) {
-                        FullWallet fullWallet = data.getParcelableExtra(WalletConstants.EXTRA_FULL_WALLET);
-                        String tokenJSON = fullWallet.getPaymentMethodToken().getToken();
-                        Log.i(REACT_CLASS, "FULL WALLET SUCCESS" + tokenJSON);
-
-                        mGetFullWalletSuccessCallback.invoke(tokenJSON);
-                    } else {
-                        Log.i(REACT_CLASS, "FULL WALLET FAILURE");
-                        mGetFullWalletErrorCallback.invoke();
-                    }
-                case WalletConstants.RESULT_ERROR:activity.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
-//                    handleError(errorCode);
-                    break;
-
                 default:
-                    super.onActivityResult(requestCode, resultCode, data);
-                    break;
+                    // Do nothing.
             }
+
+            mRequestPaymentPromise = null;
         }
+
+
     };
 
+
+    /**
+     * Constructor
+     * @param context
+     */
     public ReactNativePaymentsModule(ReactApplicationContext context) {
         // Pass in the context to the constructor and save it so you can emit events
         // https://facebook.github.io/react-native/docs/native-modules-android.html#the-toast-module
         super(context);
 
-        reactContext = context;
+        context.addActivityEventListener(mActivityEventListener);
 
-        reactContext.addActivityEventListener(mActivityEventListener);
     }
 
     @Override
     public String getName() {
-        // Tell React the name of the module
-        // https://facebook.github.io/react-native/docs/native-modules-android.html#the-toast-module
-        return REACT_CLASS;
+        return EXPORT_NAME;
     }
 
-    // Public Methods
-    // ---------------------------------------------------------------------------------------------
-    @ReactMethod
-    public void getSupportedGateways(Callback errorCallback, Callback successCallback) {
-        WritableNativeArray supportedGateways = new WritableNativeArray();
-
-        successCallback.invoke(supportedGateways);
+    @Override
+    public Map<String, Object> getConstants() {
+        final Map<String, Object> constants = new HashMap<>();
+        constants.put(ENVIRONMENT_PRODUCTION_KEY, WalletConstants.ENVIRONMENT_PRODUCTION);
+        constants.put(ENVIRONMENT_TEST_KEY, WalletConstants.ENVIRONMENT_TEST);
+        return constants;
     }
 
+    /**
+     * Check if google pay is available
+     * @see <a
+     *     href="https://developers.google.com/android/reference/com/google/android/gms/wallet/PaymentsClient#isReadyToPay(com.google.android.gms.wallet.IsReadyToPayRequest)">PaymentsClient#IsReadyToPay</a>
+     */
     @ReactMethod
-    public void canMakePayments(ReadableMap paymentMethodData, Callback errorCallback, Callback successCallback) {
-        final Callback callback = successCallback;
-        IsReadyToPayRequest req = IsReadyToPayRequest.newBuilder()
-                .addAllowedCardNetwork(WalletConstants.CardNetwork.MASTERCARD)
-                .addAllowedCardNetwork(WalletConstants.CardNetwork.VISA)
-                .build();
-
-        int environment = getEnvironmentFromPaymentMethodData(paymentMethodData);
-        if (mGoogleApiClient == null) {
-            buildGoogleApiClient(getCurrentActivity(), environment);
+    public void possiblyShowGooglePayButton(int environment, ReadableArray cardNetworks , Boolean existingPaymentMethodRequired, final Promise promise) {
+        final JSONObject isReadyToPayJson = ReactNativePaymentsModule.getIsReadyToPayRequest(cardNetworks, existingPaymentMethodRequired);
+        if (isReadyToPayJson == null) {
+            promise.reject(NOT_READY_TO_PAY, "not ready to pay");
+        }
+        IsReadyToPayRequest request = IsReadyToPayRequest.fromJson(isReadyToPayJson.toString());
+        if (request == null) {
+            promise.reject(NOT_READY_TO_PAY, "not ready to pay");
         }
 
-        Wallet.Payments.isReadyToPay(mGoogleApiClient, req)
-                .setResultCallback(new ResultCallback<BooleanResult>() {
+        Activity activity = getCurrentActivity();
+
+        if(activity == null){
+            promise.reject(E_NO_ACTIVITY, "activity is null");
+        }
+
+        Task<Boolean> task = getPaymentsClient(environment, activity).isReadyToPay(request);
+        task.addOnCompleteListener(
+                new OnCompleteListener<Boolean>() {
                     @Override
-                    public void onResult(@NonNull BooleanResult booleanResult) {
-                        callback.invoke(booleanResult.getValue());
+                    public void onComplete(@NonNull Task<Boolean> task) {
+                        try {
+                            boolean result = task.getResult(ApiException.class);
+                            if (result) {
+                                promise.resolve(result);
+                            }else{
+                                promise.reject(NOT_READY_TO_PAY, "not ready to pay");
+                            }
+                        } catch (ApiException exception) {
+                            promise.reject(E_FAILED_TO_DETECT_IF_READY, exception.getMessage());
+                        }
                     }
                 });
     }
 
+
+    /**
+     * Display the Google Pay payment sheet
+     */
     @ReactMethod
-    public void abort(Callback errorCallback, Callback successCallback) {
-        Log.i(REACT_CLASS, "ANDROID PAY ABORT" + getCurrentActivity().toString());
-        successCallback.invoke();
-    }
+    public void requestPayment(int environment, ReadableMap requestData, Boolean canMakePaymentsUsingNetworks, final Promise promise) {
+        isAbleToPay = canMakePaymentsUsingNetworks;
 
-    @ReactMethod
-    public void show(
-            ReadableMap paymentMethodData,
-            ReadableMap details,
-            ReadableMap options,
-            Callback errorCallback,
-            Callback successCallback
-    ) {
-        mShowSuccessCallback = successCallback;
-        mShowErrorCallback = errorCallback;
+        Activity activity = getCurrentActivity();
 
-        Log.i(REACT_CLASS, "ANDROID PAY SHOW" + options);
-
-        Boolean shouldRequestShipping = options.hasKey("requestShipping") && options.getBoolean("requestShipping")
-                        || options.hasKey("requestPayerName") && options.getBoolean("requestPayerName")
-                        || options.hasKey("requestPayerPhone") && options.getBoolean("requestPayerPhone");
-        Boolean shouldRequestPayerPhone = options.hasKey("requestPayerPhone") && options.getBoolean("requestPayerPhone");
-
-        final PaymentMethodTokenizationParameters parameters = buildTokenizationParametersFromPaymentMethodData(paymentMethodData);
-
-        // TODO: clean up MaskedWalletRequest
-        ReadableMap total = details.getMap("total").getMap("amount");
-        final MaskedWalletRequest maskedWalletRequest = MaskedWalletRequest.newBuilder()
-                .setPaymentMethodTokenizationParameters(parameters)
-                .setPhoneNumberRequired(shouldRequestPayerPhone)
-                .setShippingAddressRequired(shouldRequestShipping)
-                .setEstimatedTotalPrice(total.getString("value"))
-                .setCurrencyCode(total.getString("currency"))
-                .build();
-
-        int environment = getEnvironmentFromPaymentMethodData(paymentMethodData);
-        if (mGoogleApiClient == null) {
-            buildGoogleApiClient(getCurrentActivity(), environment);
+        if(activity == null){
+            promise.reject(E_NO_ACTIVITY, "activity is null");
+            return;
         }
 
-        Wallet.Payments.loadMaskedWallet(mGoogleApiClient, maskedWalletRequest, LOAD_MASKED_WALLET_REQUEST_CODE);
-    }
+        this.mRequestPaymentPromise = promise;
 
-    @ReactMethod
-    public void getFullWalletAndroid(
-            String googleTransactionId,
-            ReadableMap paymentMethodData,
-            ReadableMap details,
-            Callback errorCallback,
-            Callback successCallback
-    ) {
-        mGetFullWalletSuccessCallback = successCallback;
-        mGetFullWalletErrorCallback = errorCallback;
-
-        ReadableMap total = details.getMap("total").getMap("amount");
-        Log.i(REACT_CLASS, "ANDROID PAY getFullWalletAndroid" + details.getMap("total").getMap("amount"));
-
-        FullWalletRequest fullWalletRequest = FullWalletRequest.newBuilder()
-                .setGoogleTransactionId(googleTransactionId)
-                .setCart(Cart.newBuilder()
-                        .setCurrencyCode(total.getString("currency"))
-                        .setTotalPrice(total.getString("value"))
-                        .setLineItems(buildLineItems(details.getArray("displayItems")))
-                        .build())
-                .build();
-
-        int environment = getEnvironmentFromPaymentMethodData(paymentMethodData);
-        if (mGoogleApiClient == null) {
-            buildGoogleApiClient(getCurrentActivity(), environment);
+        JSONObject paymentDataRequestJson = ReactNativePaymentsModule.getPaymentDataRequest(requestData);
+        if (paymentDataRequestJson == null) {
+            promise.reject(E_NO_PAYMENT_REQUEST_JSON, "payment data request json is null");
+            return;
         }
-
-        Wallet.Payments.loadFullWallet(mGoogleApiClient, fullWalletRequest, LOAD_FULL_WALLET_REQUEST_CODE);
-    }
-
-    // Private Method
-    // ---------------------------------------------------------------------------------------------
-    private static PaymentMethodTokenizationParameters buildTokenizationParametersFromPaymentMethodData(ReadableMap paymentMethodData) {
-        ReadableMap tokenizationParameters = paymentMethodData.getMap("paymentMethodTokenizationParameters");
-        String tokenizationType = tokenizationParameters.getString("tokenizationType");
-
-
-        if (tokenizationType.equals("GATEWAY_TOKEN")) {
-            ReadableMap parameters = tokenizationParameters.getMap("parameters");
-            PaymentMethodTokenizationParameters.Builder parametersBuilder = PaymentMethodTokenizationParameters.newBuilder()
-                    .setPaymentMethodTokenizationType(PaymentMethodTokenizationType.PAYMENT_GATEWAY)
-                    .addParameter("gateway", parameters.getString("gateway"));
-
-            ReadableMapKeySetIterator iterator = parameters.keySetIterator();
-
-            while (iterator.hasNextKey()) {
-                String key = iterator.nextKey();
-
-                parametersBuilder.addParameter(key, parameters.getString(key));
-            }
-
-            return parametersBuilder.build();
-
-        } else {
-            String publicKey = tokenizationParameters.getMap("parameters").getString("publicKey");
-
-            return PaymentMethodTokenizationParameters.newBuilder()
-                    .setPaymentMethodTokenizationType(PaymentMethodTokenizationType.NETWORK_TOKEN)
-                    .addParameter("publicKey", publicKey)
-                    .build();
+        PaymentDataRequest request =
+                PaymentDataRequest.fromJson(paymentDataRequestJson.toString());
+        if (request != null) {
+            AutoResolveHelper.resolveTask(
+                    getPaymentsClient(environment, activity).loadPaymentData(request), activity, LOAD_PAYMENT_DATA_REQUEST_CODE);
+        }else{
+            promise.reject(E_NO_PAYMENT_REQUEST, "payment data request is null");
         }
     }
 
-    private static List buildLineItems(ReadableArray displayItems) {
-        List<LineItem> list = new ArrayList<LineItem>();
 
+    private PaymentsClient getPaymentsClient(int environment, @NonNull Activity activity){
 
-        for (int i = 0; i < (displayItems.size() - 1); i++) {
-            ReadableMap displayItem = displayItems.getMap(i);
-            ReadableMap amount = displayItem.getMap("amount");
+        if(mPaymentsClient == null){
 
-            list.add(LineItem.newBuilder()
-                    .setCurrencyCode(amount.getString("currency"))
-                    .setDescription(displayItem.getString("label"))
-                    .setQuantity("1")
-                    .setUnitPrice(amount.getString("value"))
-                    .setTotalPrice(amount.getString("value"))
-                    .build());
+            // initialize a Google Pay API client for an environment suitable for testing
+            mPaymentsClient =
+                    Wallet.getPaymentsClient(
+                            activity,
+                            new Wallet.WalletOptions.Builder()
+                                    .setEnvironment(environment)
+                                    .build());
         }
 
-        Log.i(REACT_CLASS, "ANDROID PAY getFullWalletAndroid" + list);
-
-        return list;
-    }
-
-    private static WritableNativeMap buildAddressFromUserAddress(UserAddress userAddress) {
-        WritableNativeMap address = new WritableNativeMap();
-
-        address.putString("recipient", userAddress.getName());
-        address.putString("organization", userAddress.getCompanyName());
-        address.putString("addressLine", userAddress.getAddress1());
-        address.putString("city", userAddress.getLocality());
-        address.putString("region", userAddress.getAdministrativeArea());
-        address.putString("country", userAddress.getCountryCode());
-        address.putString("postalCode", userAddress.getPostalCode());
-        address.putString("phone", userAddress.getPhoneNumber());
-        address.putNull("languageCode");
-        address.putString("sortingCode", userAddress.getSortingCode());
-        address.putString("dependentLocality", userAddress.getLocality());
-
-        return address;
-    }
-
-    private void sendEvent(
-            ReactApplicationContext reactContext,
-            String eventName,
-            @Nullable WritableNativeMap params
-    ) {
-        reactContext
-                .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
-                .emit(eventName, params);
-    }
-
-    private int getEnvironmentFromPaymentMethodData(ReadableMap paymentMethodData) {
-        return paymentMethodData.hasKey("environment") && paymentMethodData.getString("environment").equals("TEST")
-                ? WalletConstants.ENVIRONMENT_TEST
-                : WalletConstants.ENVIRONMENT_PRODUCTION;
-    }
-
-    // Google API Client
-    // ---------------------------------------------------------------------------------------------
-    private void buildGoogleApiClient(Activity currentActivity, int environment) {
-        mGoogleApiClient = new GoogleApiClient.Builder(currentActivity)
-                .addConnectionCallbacks(this)
-                .addOnConnectionFailedListener(this)
-                .addApi(Wallet.API, new Wallet.WalletOptions.Builder()
-                        .setEnvironment(environment)
-                        .setTheme(WalletConstants.THEME_LIGHT)
-                        .build())
-                .build();
-        mGoogleApiClient.connect();
-    }
-
-    @Override
-    public void onConnected(Bundle connectionHint) {
-//        mLastLocation = LocationServices.FusedLocationApi.getLastLocation(mGoogleApiClient);
-    }
-
-
-    @Override
-    public void onConnectionFailed(ConnectionResult result) {
-        // Refer to Google Play documentation for what errors can be logged
-        Log.i(REACT_CLASS, "Connection failed: ConnectionResult.getErrorCode() = " + result.getErrorCode());
-    }
-
-    @Override
-    public void onConnectionSuspended(int cause) {
-        // Attempts to reconnect if a disconnect occurs
-        Log.i(REACT_CLASS, "Connection suspended");
-        mGoogleApiClient.connect();
+        return mPaymentsClient;
     }
 }
